@@ -89,6 +89,7 @@ def transform_data(stream_df, user_df, song_df):
 
     transformed_df = cleaned_stream_df.join(cleaned_song_df, on="track_id", how="left").join(cleaned_user_df, on="user_id", how="left")
     transformed_df = transformed_df.fillna(value="Unknown", subset =["artists", "album_name"])
+    transformed_df = transformed_df.withColumn("listen_time", F.date_format("listen_time", "yyyy-MM-dd HH"))
     transformed_df.createOrReplaceTempView("streamed_music_tb")
     return  transformed_df
 def validate_data(df, required_columns, not_null_columns):
@@ -97,31 +98,86 @@ def validate_data(df, required_columns, not_null_columns):
 
 def listener_count_per_gener(df):
     return df.groupBy("track_genre").agg(
-    F.count("user_id").alias("listen_count"),
+    F.count("*").alias("listen_count"),
     F.mean("duration_ms").alias("avg_track_duration")
 )
 
-def most_popular_track_per_gener():
+def most_popular_track_per_gener(spark):
     spark.sql("""
               WITH ranked_tracks AS (
                 SELECT
                     track_genre,
                     track_name,
                     popularity,
+                    COUNT(*) OVER (PARTITION BY track_genre) AS listen_count,
+                    AVG(duration_ms) OVER (PARTITION BY track_genre) AS avg_track_duration,
                     RANK() OVER (PARTITION BY track_genre ORDER BY popularity DESC) as most_popular_rank
                 FROM streamed_music_tb
               )
               SELECT
                 track_genre,
-                track_name,
+                listen_count,
+                avg_track_duration,
+                track_name AS most_popular_track,
                 popularity 
               FROM ranked_tracks
-              WHERE most_popular_rank=1;
+              WHERE most_popular_rank=1
+              ORDER BY popularity;
               """).show()
 
 
-def unique_listners_per_hour():
-    pass
+def unique_listners_per_hour(spark):
+    spark.sql("""
+            WITH hour_stream AS (
+                SELECT
+                    user_id,
+                    track_id,
+                    artists,
+                    listen_time
+                FROM streamed_music_tb
+            ),
+            listener_counts AS (
+                SELECT 
+                    COUNT(DISTINCT user_id) AS unique_listeners,
+                    listen_time
+                FROM hour_stream
+                GROUP BY listen_time
+              ),
+            artists_rankings AS (
+                SELECT 
+                    track_id,
+                    listen_time,
+                    RANK() OVER (PARTITION BY listen_time ORDER BY COUNT(*) DESC) AS artist_rank
+                FROM hour_stream
+                GROUP BY listen_time, track_id
+              ),
+              track_artists AS (
+                SELECT 
+                    DISTINCT track_id, listen_time, artists
+                FROM hour_stream
+            ),
+            track_diversity AS (
+                SELECT
+                    listen_time,
+                    COUNT(DISTINCT track_id) AS unique_tracks,
+                    COUNT(track_id) AS total_plays
+                FROM hour_stream
+                GROUP BY listen_time
+              )
+            SELECT
+                lc.listen_time,
+                ta.artists,
+                lc.unique_listeners,
+                td.unique_tracks, 
+                td.total_plays,
+                ROUND(td.unique_tracks * 1.0 / td.total_plays, 5) AS track_diversity_index
+              FROM listener_counts lc
+              JOIN artists_rankings ar ON lc.listen_time = ar.listen_time
+              JOIN track_artists ta ON ar.track_id = ta.track_id AND ar.listen_time = ta.listen_time
+              JOIN track_diversity td ON lc.listen_time = td.listen_time
+              WHERE ar.artist_rank=1
+              ORDER BY lc.listen_time;
+            """).show()
 
 if __name__=="__main__":
     spark = create_spark_session()
@@ -147,8 +203,10 @@ if __name__=="__main__":
     transfromed_df = transform_data(stream_df=stream_df, song_df=song_df, user_df=user_df)
 
 
-    df = listener_count_per_gener(transfromed_df)
-    df.show()
+    # df = listener_count_per_gener(transfromed_df)
+    # df.show()
+    # most_popular_track_per_gener(spark)
+    unique_listners_per_hour(spark)
     # transfromed_df.show(10)
 
 
