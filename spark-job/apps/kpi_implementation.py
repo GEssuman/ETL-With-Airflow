@@ -4,7 +4,7 @@ from pyspark.sql.types import *
 import os
 from datetime import datetime
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
-
+from helper_functions import load_from_s3, read_from_db, create_spark_session
 
 ##Load env vairables
 RDS_POSTGRES_DB = os.getenv("RDS_POSTGRES_DB")
@@ -20,57 +20,29 @@ streaming_schema = StructType([
     StructField("listen_time", TimestampType(), True)
 ])
 
-
-def create_spark_session():
-    spark = SparkSession.builder \
-            .appName("MusicStreamingETL") \
-            .config("spark.jars", "/opt/spark/resources/postgresql-42.7.3.jar") \
-            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-            .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.EnvironmentVariableCredentialsProvider") \
-            .getOrCreate()
-    return spark
-
-
-def load_from_s3(spark, schema, s3_bucket, is_header):
-    data = spark.read\
-    .option("header", is_header)\
-        .schema(schema)\
-            .csv(s3_bucket)
-    return data
-
-def extract_user_metadata(spark):
-    users_ddf = spark.read.format("jdbc")\
-    .option(f"url", f"jdbc:postgresql://rds_postgres:5432/{RDS_POSTGRES_DB}")\
-        .option("user", RDS_POSTGRES_USER)\
-            .option("password", RDS_POSTGRES_PASSWORD)\
-                .option("dbtable", "users")\
-                    .option("driver", "org.postgresql.Driver")\
-                    .load()
-    return users_ddf
-
-def extract_song_metadata(spark):
-    songs_ddf = spark.read.format("jdbc")\
-    .option(f"url", f"jdbc:postgresql://rds_postgres:5432/{RDS_POSTGRES_DB}")\
-        .option("user", RDS_POSTGRES_USER)\
-            .option("password", RDS_POSTGRES_PASSWORD)\
-                .option("dbtable", "songs")\
-                    .option("driver", "org.postgresql.Driver")\
-                    .load()
-    return songs_ddf
+transformed_schema = StructType([
+    StructField("user_id", IntegerType(), True),
+    StructField("track_id", StringType(), True),
+    StructField("listen_time", TimestampType(), True),
+    StructField("id", IntegerType(), True),
+    StructField("artists", StringType(), True),
+    StructField("album_name", StringType(), True),
+    StructField("track_name", StringType(), True),
+    StructField("popularity", IntegerType(), True),
+    StructField("duration_ms", IntegerType(), True),
+    StructField("instrumentalness", FloatType(), True),
+    StructField("track_genre", StringType(), True),
+    StructField("user_name", StringType(), True),
+])
 
 
 
-def transform_data(stream_df, user_df, song_df):
-    cleaned_song_df = song_df.drop(*["explicit", "danceability", "energy", "key", "loudness", "mode", "speechiness", "acousticness", "intrumentalness", "liveness", "valence", "tempo", "time_signature"])
-    cleaned_user_df = user_df.drop(*["user_age", "user_country", "created_at"])
-    cleaned_stream_df = stream_df.dropna(subset=["track_id"])
 
 
-    transformed_df = cleaned_stream_df.join(cleaned_song_df, on="track_id", how="left").join(cleaned_user_df, on="user_id", how="left")
-    transformed_df = transformed_df.fillna(value="Unknown", subset =["artists", "album_name"])
-    # transformed_df = transformed_df.withColumn("listen_time", F.date_format("listen_time", "yyyy-MM-dd HH"))
-    transformed_df.createOrReplaceTempView("streamed_music_tb")
-    return  transformed_df
+
+
+
+
 
 
 
@@ -103,7 +75,7 @@ def most_popular_track_per_gener(spark):
               ORDER BY popularity;
               """)
 
-# date_trunc('hour', listen_time)
+
 def unique_listners_per_hour(spark):
     return spark.sql("""
             WITH hour_stream AS (
@@ -111,50 +83,50 @@ def unique_listners_per_hour(spark):
                     user_id,
                     track_id,
                     artists,
-                    date_trunc('hour', listen_time) as listen_time_hour
+                    listen_time
                 FROM streamed_music_tb
             ),
             listener_counts AS (
                 SELECT 
                     COUNT(DISTINCT user_id) AS unique_listeners,
-                    listen_time_hour
+                    listen_time
                 FROM hour_stream
-                GROUP BY listen_time_hour
+                GROUP BY listen_time
               ),
             artists_rankings AS (
                 SELECT 
                     track_id,
-                    listen_time_hour,
-                    ROW_NUMBER() OVER (PARTITION BY listen_time_hour ORDER BY COUNT(*) DESC) AS artist_rank
+                    listen_time,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', listen_time) ORDER BY COUNT(*) DESC) AS artist_rank
                 FROM hour_stream
-                GROUP BY listen_time_hour, track_id
+                GROUP BY listen_time, track_id
               ),
               track_artists AS (
                 SELECT 
-                    DISTINCT track_id, listen_time_hour, artists
+                    DISTINCT track_id, listen_time, artists
                 FROM hour_stream
             ),
             track_diversity AS (
                 SELECT
-                    listen_time_hour,
+                    listen_time,
                     COUNT(DISTINCT track_id) AS unique_tracks,
                     COUNT(track_id) AS total_plays
                 FROM hour_stream
-                GROUP BY listen_time_hour
+                GROUP BY listen_time
               )
             SELECT
-                lc.listen_time_hour,
+                lc.listen_time,
                 ta.artists,
                 lc.unique_listeners,
                 td.unique_tracks, 
                 td.total_plays,
                 ROUND(td.unique_tracks * 1.0 / td.total_plays, 5) AS track_diversity_index
               FROM listener_counts lc
-              JOIN artists_rankings ar ON lc.listen_time_hour = ar.listen_time_hour
-              JOIN track_artists ta ON ar.track_id = ta.track_id AND ar.listen_time_hour = ta.listen_time_hour
-              JOIN track_diversity td ON lc.listen_time_hour = td.listen_time_hour
+              JOIN artists_rankings ar ON lc.listen_time = ar.listen_time
+              JOIN track_artists ta ON ar.track_id = ta.track_id AND ar.listen_time = ta.listen_time
+              JOIN track_diversity td ON lc.listen_time = td.listen_time
               WHERE ar.artist_rank=1
-              ORDER BY lc.listen_time_hour;
+              ORDER BY lc.listen_time;
             """)
     
 
@@ -204,31 +176,24 @@ if __name__=="__main__":
     spark = create_spark_session()
     print(f"hello world {spark}")
 
-    stream_df = load_from_s3(spark, streaming_schema, f"s3a://{AWS_S3_BUCKET}/stream-data/", True)
-    user_df = extract_user_metadata(spark=spark)
-    song_df = extract_song_metadata(spark)
 
+    properties = {
+        "db_name":RDS_POSTGRES_DB,
+        "user": RDS_POSTGRES_USER,
+        "password": RDS_POSTGRES_PASSWORD,
+        "driver": "org.postgresql.Driver",
+        "table":"staging.transformed_data"
+    }
 
-    stream_df_req_cols = ["user_id", "track_id", "listen_time"]
-    stream_df_not_null_cols = ["user_id", "track_id"]
-    user_df_req_cols = ["user_id","user_name","user_age","user_country","created_at"]
-    user_df_not_null_cols = ["user_id","user_name"]
-    song_df_req_cols = ["id","track_id","artists","album_name","track_name","popularity","duration_ms","time_signature","track_genre"]
-    song_df__not_null_cols = ["id","track_id","artists","album_name","track_name","track_genre"]
-
-    # stream_df_is_valid = validate_data(stream_df, stream_df_req_cols, stream_df_not_null_cols)
-    # user_df_is_valid = validate_data(user_df, user_df_req_cols, user_df_not_null_cols)
-    # song_df_is_valid = validate_data(song_df, song_df_req_cols, song_df__not_null_cols)
-    # if (stream_df_is_valid and user_df_is_valid and song_df_is_valid):
-    #     print("Validation Gone Wrong")
-    transfromed_df = transform_data(stream_df=stream_df, song_df=song_df, user_df=user_df)
-
-
+    # transformed_df = read_from_db(spark, properties)
+    transformed_df = load_from_s3(spark, transformed_schema, f"s3a://music-staging-gke/transformed_streamed_music/", is_header=False)
+    transformed_df.createOrReplaceTempView("streamed_music_tb")
     # df = listener_count_per_gener(transfromed_df)
     # df.show()
-    # most_popular_track_per_gener(spark)
-    uni_df = unique_listners_per_hour(spark)
+    uni_df = most_popular_track_per_gener(spark)
+    # uni_df = unique_listners_per_hour(spark)
     uni_df.show()
+    print(uni_df.count())
     # load_data_to_db(uni_df, "staging.hourly_stream_insights")
     # transfromed_df.show(10)
 
