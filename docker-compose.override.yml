@@ -1,0 +1,34 @@
+
+
+services:
+  api-server:
+    ports:
+      - 8002:8080
+    networks:
+      - project1_etlwithairflow_etl-network
+
+  scheduler:
+    volumes:
+      - ./spark-job/apps:/opt/spark/apps
+      - ./spark-job/resources:/opt/spark/resources 
+    networks:
+      - project1_etlwithairflow_etl-network
+
+  triggerer:
+    volumes:
+      - ./spark-job/apps:/opt/spark/apps
+      - ./spark-job/resources:/opt/spark/resources 
+    networks:
+      - project1_etlwithairflow_etl-network
+
+  dag-processor:
+    volumes:
+      - ./spark-job/apps:/opt/spark/apps
+      - ./spark-job/resources:/opt/spark/resources 
+    networks:
+      - project1_etlwithairflow_etl-network
+
+
+networks:
+  project1_etlwithairflow_etl-network:
+    external: true

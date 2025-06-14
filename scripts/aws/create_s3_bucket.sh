@@ -11,3 +11,7 @@ source $ENV_DIR
 
 # Create an s3 bucket
 aws s3 mb s3://$AWS_S3_BUCKET --region ${AWS_REGION:-"eu-north-1"}
+
+
+
+# aws s3 mb s3://$AWS_S3_BUCKET --region ${AWS_REGION:-"eu-north-1"}

@@ -45,21 +45,11 @@ def load_data_to_db(df, db_info):
     .save()
 
 
-def validate_data(df, required_columns, not_null_columns):
-    return validate_columns(df, required_columns=required_columns) \
-        and validate_not_null(df, not_null_columns=not_null_columns)
 
 
 def validate_columns(df, required_columns):
     return set(required_columns).issubset(set(df.columns))
 
-def validate_not_null(df, not_null_columns):
-    for col in not_null_columns:
-        null_count = df.filter(df[col].isNull()).count()
-        if null_count > 0:
-            print(f"Column '{col}' has {null_count} null value(s).")
-            return False
-    return True
 
 
 def read_from_db(spark, db_info):
