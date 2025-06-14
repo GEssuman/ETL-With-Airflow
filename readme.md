@@ -30,6 +30,9 @@ This project processes music streaming data from multiple sources to provide act
 - Docker (For Local Development)
 - AWS Account with access to S3
 
+
+*NB: the aws script to upload is in the aws directory*
+
 ## Running Locally
 
 1. Clone the repository
