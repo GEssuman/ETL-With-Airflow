@@ -28,7 +28,7 @@ services:
     user: root
     ports:
       - "7077:7077"
-      - "8080:8080"
+      - "8083:8080"
     env_file:
       - .env
     volumes:
@@ -48,4 +48,4 @@ volumes:
 
 networks:
   etl-network:
-    driver: bridge
+    

@@ -6,7 +6,7 @@ from datetime import datetime
 from pyspark.sql.types import StructType, StructField, IntegerType, StringType, TimestampType
 from helper_functions import load_from_s3, read_from_db, create_spark_session
 
-##Load env vairables
+#Load env vairables
 RDS_POSTGRES_DB = os.getenv("RDS_POSTGRES_DB")
 RDS_POSTGRES_USER = os.getenv("RDS_POSTGRES_USER")
 RDS_POSTGRES_PASSWORD = os.getenv("RDS_POSTGRES_PASSWORD")
@@ -130,16 +130,16 @@ def unique_listners_per_hour(spark):
             """)
     
 
-def load_data_to_db(df, schema):
-    df.write \
-    .format("jdbc") \
-    .option("url", f"jdbc:postgresql://rds_postgres:5432/{RDS_POSTGRES_DB}") \
-    .option("dbtable", schema) \
-    .option("user", RDS_POSTGRES_USER) \
-    .option("password", RDS_POSTGRES_PASSWORD) \
-    .option("driver", "org.postgresql.Driver") \
-    .mode("append") \
-    .save()
+# def load_data_to_db(df, schema):
+#     df.write \
+#     .format("jdbc") \
+#     .option("url", f"jdbc:postgresql://rds_postgres:5432/{RDS_POSTGRES_DB}") \
+#     .option("dbtable", schema) \
+#     .option("user", RDS_POSTGRES_USER) \
+#     .option("password", RDS_POSTGRES_PASSWORD) \
+#     .option("driver", "org.postgresql.Driver") \
+#     .mode("append") \
+#     .save()
 
     
 
@@ -177,7 +177,23 @@ if __name__=="__main__":
     print(f"hello world {spark}")
 
 
-    properties = {
+    most_popular_track_properties = {
+        "db_name":RDS_POSTGRES_DB,
+        "user": RDS_POSTGRES_USER,
+        "password": RDS_POSTGRES_PASSWORD,
+        "driver": "org.postgresql.Driver",
+        "table":"presentation.most_popular_track_insight"
+    }
+
+    unique_listners_properties = {
+        "db_name":RDS_POSTGRES_DB,
+        "user": RDS_POSTGRES_USER,
+        "password": RDS_POSTGRES_PASSWORD,
+        "driver": "org.postgresql.Driver",
+        "table":"presentation.unique_listeners"
+    }
+
+    transformed_properties = {
         "db_name":RDS_POSTGRES_DB,
         "user": RDS_POSTGRES_USER,
         "password": RDS_POSTGRES_PASSWORD,
@@ -185,16 +201,44 @@ if __name__=="__main__":
         "table":"staging.transformed_data"
     }
 
-    # transformed_df = read_from_db(spark, properties)
+
+    transformed_df = read_from_db(spark, transformed_properties)
+
+
     transformed_df = load_from_s3(spark, transformed_schema, f"s3a://music-staging-gke/transformed_streamed_music/", is_header=False)
     transformed_df.createOrReplaceTempView("streamed_music_tb")
-    # df = listener_count_per_gener(transfromed_df)
-    # df.show()
-    uni_df = most_popular_track_per_gener(spark)
-    # uni_df = unique_listners_per_hour(spark)
-    uni_df.show()
-    print(uni_df.count())
-    # load_data_to_db(uni_df, "staging.hourly_stream_insights")
-    # transfromed_df.show(10)
+
+
+
+    
+    
+    
+    most_popular_track_df = most_popular_track_per_gener(spark)
+    
+    
+    unique_listners_df = unique_listners_per_hour(spark)
+    
+    # Load to readshift/postgresql
+
+    unique_listners_df.write \
+    .format("jdbc") \
+    .option("url", f"jdbc:postgresql://rds_postgres:5432/{unique_listners_properties["db_name"]}") \
+    .option("dbtable", unique_listners_properties["table"]) \
+    .option("user", unique_listners_properties["user"]) \
+    .option("password", unique_listners_properties["password"]) \
+    .option("driver", unique_listners_properties["driver"]) \
+    .save()
+
+
+    most_popular_track_df.write \
+    .format("jdbc") \
+    .option("url", f"jdbc:postgresql://rds_postgres:5432/{most_popular_track_properties["db_name"]}") \
+    .option("dbtable", most_popular_track_properties["table"]) \
+    .option("user", most_popular_track_properties["user"]) \
+    .option("password", most_popular_track_properties["password"]) \
+    .option("driver", most_popular_track_properties["driver"]) \
+    .save()
+
+
 
 

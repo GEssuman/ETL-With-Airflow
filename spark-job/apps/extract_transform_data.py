@@ -46,6 +46,7 @@ def extract_song_metadata(spark):
 
 
 def transform_data(stream_df, user_df, song_df):
+
     cleaned_song_df = song_df.drop(*["explicit", "danceability", "energy", "key", "loudness", "mode", "speechiness", "acousticness", "intrumentalness", "liveness", "valence", "tempo", "time_signature"])
     cleaned_user_df = user_df.drop(*["user_age", "user_country", "created_at"])
     cleaned_stream_df = stream_df.dropna(subset=["track_id"])
@@ -53,8 +54,10 @@ def transform_data(stream_df, user_df, song_df):
 
     transformed_df = cleaned_stream_df.join(cleaned_song_df, on="track_id", how="left").join(cleaned_user_df, on="user_id", how="left")
     transformed_df = transformed_df.fillna(value="Unknown", subset =["artists", "album_name"])
-    # transformed_df = transformed_df.withColumn("listen_time", F.date_format("listen_time", "yyyy-MM-dd HH"))
-    # transformed_df.createOrReplaceTempView("streamed_music_tb")
+
+
+    transformed_df.drop_duplicates()
+    
     return  transformed_df
 
 
@@ -70,11 +73,8 @@ if __name__ == "__main__":
     stream_df = load_from_s3(spark, schema=streaming_schema, s3_bucket=s3_bucket, is_header=True)
 
     tream_df_req_cols = ["user_id", "track_id", "listen_time"]
-    stream_df_not_null_cols = ["user_id", "track_id"]
     user_df_req_cols = ["user_id","user_name","user_age","user_country","created_at"]
-    user_df_not_null_cols = ["user_id","user_name"]
     song_df_req_cols = ["id","track_id","artists","album_name","track_name","popularity","duration_ms","time_signature","track_genre"]
-    song_df__not_null_cols = ["id","track_id","artists","album_name","track_name","track_genre"]
 
 
     
