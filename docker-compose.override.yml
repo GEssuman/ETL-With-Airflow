@@ -1,34 +1,69 @@
 
 
 services:
-  api-server:
+  rds_postgres:
+    image: postgres:14
+    container_name: "rds_postgres"
+    restart: always
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "pg_isready -d ${RDS_POSTGRES_DB} -U ${RDS_POSTGRES_USER}" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    environment:
+      - POSTGRES_DB=${RDS_POSTGRES_DB}
+      - POSTGRES_USER=${RDS_POSTGRES_USER}
+      - POSTGRES_PASSWORD=${RDS_POSTGRES_PASSWORD}
+    volumes:
+      - rds_postgres_data:/var/lib/postgresql/data
+      - ./include/data:/opt/sql-data
+      - ./scripts/sql:/docker-entrypoint-initdb.d
     ports:
-      - 8002:8080
+    - 5436:5432
     networks:
-      - project1_etlwithairflow_etl-network
+      - airflow
 
-  scheduler:
+    
+  spark-master:
+    image: bitnami/spark:latest
+    container_name: etl-spark-job
+    user: root
+    ports:
+      - "7077:7077"
+      - "8083:8080"
+    env_file:
+      - .env
     volumes:
-      - ./spark-job/apps:/opt/spark/apps
-      - ./spark-job/resources:/opt/spark/resources 
-    networks:
-      - project1_etlwithairflow_etl-network
+      - ./include/spark-job/apps:/usr/local/airflow/include/spark-job/apps/
+      - ./include/spark-job/resources:/usr/local/airflow/include/spark-job/resources
+      - ./include/spark-job/apps:/opt/spark/apps/
+      - ./include/spark-job/resources:/opt/spark/resources
 
-  triggerer:
+    environment:
+      - SPARK_MODE=master
+      - SPARK_LOCAL_IP=spark-master
+    networks:
+      - airflow
+
+  spark-worker:
+    image: bitnami/spark:latest
+    container_name: etl-spark-job-w
+    user: root
+    env_file:
+      - .env
     volumes:
-      - ./spark-job/apps:/opt/spark/apps
-      - ./spark-job/resources:/opt/spark/resources 
+      - ./include/spark-job/apps:/usr/local/airflow/include/spark-job/apps/
+      - ./include/spark-job/resources:/usr/local/airflow/include/spark-job/resources
+      - ./include/spark-job/apps:/opt/spark/apps/
+      - ./include/spark-job/resources:/opt/spark/resources
+
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
     networks:
-      - project1_etlwithairflow_etl-network
+      - airflow    
 
-  dag-processor:
-    volumes:
-      - ./spark-job/apps:/opt/spark/apps
-      - ./spark-job/resources:/opt/spark/resources 
-    networks:
-      - project1_etlwithairflow_etl-network
-
-
-networks:
-  project1_etlwithairflow_etl-network:
-    external: true
+volumes:
+  rds_postgres_data:

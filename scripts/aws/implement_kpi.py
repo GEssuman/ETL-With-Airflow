@@ -5,17 +5,17 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.dynamicframe import DynamicFrame
-
-import boto3
-
-from pyspark.sql import SparkSession
-import pyspark.sql.functions as F 
+import pyspark.sql.functions as F
 from pyspark.sql.types import *
+import logging
 
 
 # Define expected parameters
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
 
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 # Glue boilerplate
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -40,21 +40,57 @@ transformed_schema = StructType([
 ])
 
 HOURLY_INSIGHT_UPSERT = """
-BEGIN;
-
-DELETE FROM presentation.hourly_stream_insights target
-USING staging.hourly_stream_insights staging
-WHERE target.listen_time = staging.listen_time;
-
-INSERT INTO presentation.hourly_stream_insights
-(listen_time, artists, unique_listeners, unique_tracks, total_plays, track_diversity)
-SELECT listen_time, artists, unique_listeners, unique_tracks, total_plays, track_diversity
+DELETE FROM presentation.hourly_stream_insights 
+USING staging.hourly_stream_insights
+WHERE presentation.hourly_stream_insights.listen_time_hour = staging.hourly_stream_insights.listen_time_hour;
+INSERT INTO presentation.hourly_stream_insights (
+    listen_time_hour,
+    artists,
+    unique_listeners,
+    unique_tracks,
+    total_plays,
+    track_diversity_index
+)
+SELECT
+    listen_time_hour,
+    artists,
+    unique_listeners,
+    unique_tracks,
+    total_plays,
+    track_diversity_index
 FROM staging.hourly_stream_insights;
-
-TRUNCATE TABLE staging.hourly_stream_insights;
-
-COMMIT;
 """
+
+GENRE_INSIGHT_UPSERT = """
+DELETE FROM presentation.most_popular_track_per_genre 
+USING staging.most_popular_track_per_genre
+WHERE presentation.most_popular_track_per_genre.track_genre = staging.most_popular_track_per_genre.track_genre;
+INSERT INTO presentation.most_popular_track_per_genre (
+    track_genre,
+    listen_count,
+    avg_track_duration,
+    most_popular_track,
+    popularity
+)
+SELECT
+    track_genre,
+    listen_count,
+    avg_track_duration,
+    most_popular_track,
+    popularity
+FROM staging.most_popular_track_per_genre;
+"""
+
+def validate_columns(df, required_columns):
+    return set(required_columns).issubset(set(df.columns))
+
+def validate_not_null(df, not_null_columns):
+    for col in not_null_columns:
+        null_count = df.filter(df[col].isNull()).count()
+        if null_count > 0:
+            logger.warning(f"Column '{col}' has {null_count} null value(s).")
+            return False
+    return True
 
 
 def convert_to_dynamicFrame(df, cntx, name):
@@ -64,15 +100,6 @@ def convert_to_dynamicFrame(df, cntx, name):
         name = name
     )
     
-# Write to S3
-def write_to_s3(dyf, cntx, s3_path, name):
-    glueContext.write_dynamic_frame.from_options(
-    dyf,
-    connection_type='s3',
-    connection_options={'path': s3_path},
-    format='csv',
-    transformation_ctx=name
-    )
 
 
 # Run transformation
@@ -85,7 +112,7 @@ def most_popular_track_per_genre(spark):
                 popularity,
                 COUNT(*) OVER (PARTITION BY track_genre) AS listen_count,
                 AVG(duration_ms) OVER (PARTITION BY track_genre) AS avg_track_duration,
-                RANK() OVER (PARTITION BY track_genre ORDER BY popularity DESC) as most_popular_rank
+                ROW_NUMBER() OVER (PARTITION BY track_genre ORDER BY popularity DESC) as most_popular_rank
             FROM streamed_music_tb
         )
         SELECT
@@ -106,98 +133,185 @@ def unique_listners_per_hour(spark):
                     user_id,
                     track_id,
                     artists,
-                    listen_time
+                    date_trunc('hour', listen_time) AS listen_time_hour
                 FROM streamed_music_tb
             ),
             listener_counts AS (
                 SELECT 
                     COUNT(DISTINCT user_id) AS unique_listeners,
-                    listen_time
+                    listen_time_hour
                 FROM hour_stream
-                GROUP BY listen_time
+                GROUP BY listen_time_hour
               ),
             artists_rankings AS (
                 SELECT 
                     track_id,
-                    listen_time,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', listen_time) ORDER BY COUNT(*) DESC) AS artist_rank
+                    listen_time_hour,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', listen_time_hour) ORDER BY COUNT(*) DESC) AS artist_rank
                 FROM hour_stream
-                GROUP BY listen_time, track_id
+                GROUP BY listen_time_hour, track_id
               ),
               track_artists AS (
                 SELECT 
-                    DISTINCT track_id, listen_time, artists
+                    DISTINCT track_id, listen_time_hour, artists
                 FROM hour_stream
             ),
             track_diversity AS (
                 SELECT
-                    listen_time,
+                    listen_time_hour,
                     COUNT(DISTINCT track_id) AS unique_tracks,
                     COUNT(track_id) AS total_plays
                 FROM hour_stream
-                GROUP BY listen_time
+                GROUP BY listen_time_hour
               )
             SELECT
-                lc.listen_time,
+                lc.listen_time_hour,
                 ta.artists,
                 lc.unique_listeners,
                 td.unique_tracks, 
                 td.total_plays,
                 ROUND(td.unique_tracks * 1.0 / td.total_plays, 5) AS track_diversity_index
               FROM listener_counts lc
-              JOIN artists_rankings ar ON lc.listen_time = ar.listen_time
-              JOIN track_artists ta ON ar.track_id = ta.track_id AND ar.listen_time = ta.listen_time
-              JOIN track_diversity td ON lc.listen_time = td.listen_time
+              JOIN artists_rankings ar ON lc.listen_time_hour = ar.listen_time_hour
+              JOIN track_artists ta ON ar.track_id = ta.track_id AND ar.listen_time_hour = ta.listen_time_hour
+              JOIN track_diversity td ON lc.listen_time_hour = td.listen_time_hour
               WHERE ar.artist_rank=1
-              ORDER BY lc.listen_time;
+              ORDER BY lc.listen_time_hour;
             """)
     
 # Load data
-transformed_df = spark.read \
-        .format("parquet") \
-        .schema(transformed_schema) \
-        .load("s3a://transformed-music-gke.amalitech/staging/")
-        
-transformed_df.show()
-# transformed_df.createOrReplaceTempView("streamed_music_tb")
+# transformed_df = spark.read \
+#         .format("parquet") \
+#         .schema(transformed_schema) \
+#         .load("s3a://transformed-music-gke.amalitech/staging/")
 
-# most_popular_per_genre_df = most_popular_track_per_genre(spark)
+try:
+    logger.info("Implement KPI Job Started...")
+    transformed_df = glueContext.create_dynamic_frame.from_options(format_options={}, connection_type="s3", format="parquet", connection_options={"paths": ["s3://transformed-music-gke.amalitech/staging/"], "recurse": True}, transformation_ctx="AmazonS3_node1750038757739").toDF()
+    # transformed_df.show()
+    logger.info("Validating Data... ")
+    required_columns = ["track_id", "listen_time", "track_genre"]
+    if not (validate_columns(transformed_df, required_columns) and validate_not_null(transformed_df, ["listen_time", "track_genre"])):
+        raise("Data was is Valid")
 
-# unique_listners_df = unique_listners_per_hour(spark)
+    # #
+    transformed_df.createOrReplaceTempView("streamed_music_tb")
 
-
-# most_popular_per_genre_dyf = convert_to_dynamicFrame(most_popular_per_genre_df, glueContext, "most_popular_per_genre_dyf" )
-# unique_listners_dyf = convert_to_dynamicFrame(most_popular_per_genre_df, glueContext, "unique_listners_dyf")
-
-# # glueContext.write_dynamic_frame.from_jdbc_conf(
-# #     frame=unique_listners_dyf,
-# #     catalog_connection=args['Redshift connection'],
-# #     connection_options={
-# #         "dbtable": "staging.hourly_stream_insights",
-# #         "database": "music_stream_db"
-# #     },
-# #     redshift_tmp_dir="s3://awsservice-temp/redshift-s3/"
-# # )
-
-# # response = boto3.client.execute_statement(
-# #     ClusterIdentifier='redshift-cluster-mucis-stream',
-# #     Database='music_stream_db',
-# #     DbUser='awsuser',
-# #     Sql=HOURLY_INSIGHT_UPSERT,
-# #     SecretArn='arn:aws:secretsmanager:eu-north-1:309797288544:secret:glue!309797288544-Redshiftconnection-1749830096604-SbsCzs'
-# # )
+except Exception as e:
+    logger.error("Failed to load data from S3.", exc_info=True)
+    raise e
 
 
 
-# write_to_s3(most_popular_per_genre_dyf, 
-#     glueContext, 
-#     "s3://transformed-music-gke.amalitech/presentation/popular_track_per_genre/", 
-#     "write_to_s3_1")
 
-# write_to_s3(unique_listners_dyf, 
-#     glueContext, 
-#     "s3://transformed-music-gke.amalitech/presentation/unique_listeners_per_hour/", 
-#     "write_to_s3_2")
+try:
+    logger.info("Running transformation: most_popular_track_per_genre...")
+    most_popular_per_genre_df = most_popular_track_per_genre(spark)
+    
 
-# Finish Glue job
-job.commit()
+    logger.info("Running transformation: unique_listners_per_hour...")
+    unique_listners_df = unique_listners_per_hour(spark)
+    
+
+    unique_listners_df = unique_listners_df.select(
+        F.col("listen_time_hour").cast("timestamp"),
+        F.col("artists").cast("string"),
+        F.col("unique_listeners").cast("int"),
+        F.col("unique_tracks").cast("int"),
+        F.col("total_plays").cast("int"),
+        F.col("track_diversity_index").cast("double")
+    )
+
+    unique_listners_df = unique_listners_df.fillna({
+        "listen_time_hour": "1970-01-01 00:00:00",  # Placeholder date
+        "artists": "Unknown",
+        "unique_listeners": 0,
+        "unique_tracks": 0,
+        "total_plays": 0,
+        "track_diversity_index": 0.0
+    })
+
+
+    most_popular_per_genre_df = most_popular_per_genre_df.select(
+        F.col("track_genre").cast("string"),
+        F.col("listen_count").cast("int"),
+        F.col("avg_track_duration").cast("double"),
+        F.col("most_popular_track").cast("string"),
+        F.col("popularity").cast("int")
+    )
+
+    most_popular_per_genre_df = most_popular_per_genre_df.fillna({
+        "track_genre": "Unknown",
+        "listen_count": 0,
+        "avg_track_duration": 0.0,
+        "most_popular_track": "N/A",
+        "popularity": 0
+    })
+    most_popular_per_genre_dyf = convert_to_dynamicFrame(most_popular_per_genre_df, glueContext, "most_popular_per_genre_dyf" )
+    unique_listeners_dyf = convert_to_dynamicFrame(unique_listners_df, glueContext, "unique_listners_dyf")
+    logger.info("TransformationS successful.")
+except Exception as e:
+    logger.error("SQL transformation failed.", exc_info=True)
+    raise e
+
+
+
+
+try:
+    # Write Hourly Stream Insight to Redshift
+    logger.info("Writing unique listener metrics to Redshift...")
+    glueContext.write_dynamic_frame.from_jdbc_conf(
+        frame=unique_listeners_dyf,  
+        catalog_connection="Redshift connection", 
+        connection_options={
+            "dbtable": "staging.hourly_stream_insights", 
+            "database": "dev",
+            "preactions": """
+                CREATE TABLE IF NOT EXISTS staging.hourly_stream_insights (
+                    listen_time_hour TIMESTAMP,
+                    artists TEXT,
+                    unique_listeners INT,
+                    unique_tracks INT,
+                    total_plays INT,
+                    track_diversity_index DOUBLE PRECISION
+                );
+                TRUNCATE staging.hourly_stream_insights;
+            """,
+            "postactions": HOURLY_INSIGHT_UPSERT
+        },
+        redshift_tmp_dir="s3://aws-glue-assets-309797288544-eu-north-1/temporary/"
+    )
+    logger.info("Write to Redshift: hourly_stream_insights completed.")
+
+    # Write Most Popular Track per Genre to Redshift
+    logger.info("Writing most popular track per genre metrics to Redshift...")
+    glueContext.write_dynamic_frame.from_jdbc_conf(
+        frame=most_popular_per_genre_dyf, 
+        catalog_connection="Redshift connection",
+        connection_options={
+            "postactions": GENRE_INSIGHT_UPSERT,
+            "dbtable": "staging.most_popular_track_per_genre", 
+            "database":"dev",
+            "preactions": """
+                CREATE TABLE IF NOT EXISTS staging.most_popular_track_per_genre (
+                    track_genre VARCHAR(50),
+                    listen_count INT,
+                    avg_track_duration DOUBLE PRECISION,
+                    most_popular_track TEXT,
+                    popularity INT
+                );
+                TRUNCATE staging.most_popular_track_per_genre;
+            """
+        },
+        redshift_tmp_dir= "s3://aws-glue-assets-309797288544-eu-north-1/temporary/"
+    )
+    logger.info("Write to Redshift: hourly_stream_insights completed.")
+except Exception as e:
+    raise e
+
+try:
+    job.commit()
+    logger.info("Glue job committed successfully.")
+except Exception as e:
+    logger.error("Job commit failed.", exc_info=True)
+    raise e

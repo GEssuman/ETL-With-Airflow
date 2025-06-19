@@ -1,3 +1,4 @@
+-- Active: 1749556361603@@127.0.0.1@5436@music_db@public
 -- Create table for music tracks with audio features
 CREATE TABLE songs (
     id INTEGER PRIMARY KEY,
